@@ -40,6 +40,7 @@ def test_guest_barriers_apply_configured_synchronous(monkeypatch, tmp_path):
         conn.close()
 
 
+@pytest.mark.linux_only  # on macOS _enforce_macos_synchronous_full forces FULL regardless of config
 def test_guest_barriers_leave_synchronous_alone_when_unset(monkeypatch, tmp_path):
     _config(monkeypatch, {})
     conn = sqlite3.connect(tmp_path / "state.db")
