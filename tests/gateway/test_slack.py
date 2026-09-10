@@ -5280,19 +5280,21 @@ class TestSlackAuthoredTextDeduplication:
         assert rendered.count("do you see") == 1
 
     def test_hydration_skips_message_unfurl_attachment(self, adapter):
-        """A permalink unfurl echoes the *linked* message — the live path
-        already skips it, so hydration must not re-append it either."""
+        """Our own message getting auto-unfurled is a self-echo — the live
+        path already skips it, so hydration must not re-append it either."""
         rendered = adapter._render_message_text(
             {
                 "text": f"<{_THREAD_PERMALINK_ESCAPED}>",
                 "attachments": [
                     {
                         "is_msg_unfurl": True,
+                        "author_id": "U_BOT",
                         "text": "the linked message body",
                         "fallback": "linked message fallback",
                     }
                 ],
-            }
+            },
+            bot_uid="U_BOT",
         )
 
         assert "the linked message body" not in rendered
@@ -5304,15 +5306,55 @@ class TestSlackAuthoredTextDeduplication:
             {
                 "text": "",
                 "attachments": [
-                    {"is_msg_unfurl": True, "text": "echoed message body"},
+                    {
+                        "is_msg_unfurl": True,
+                        "author_id": "U_BOT",
+                        "text": "echoed message body",
+                    },
                     {"title": "FiringAlert", "text": "disk usage 95%"},
                 ],
-            }
+            },
+            bot_uid="U_BOT",
         )
 
         assert "echoed message body" not in rendered
         assert "FiringAlert" in rendered
         assert "disk usage 95%" in rendered
+
+    def test_hydration_surfaces_forwarded_message(self, adapter):
+        """A permalink a HUMAN forwarded is not a self-echo — keep it, labelled."""
+        rendered = adapter._render_message_text(
+            {
+                "text": "",
+                "attachments": [
+                    {
+                        "is_share": True,
+                        "author_id": "U_OTHER",
+                        "author_name": "Alice",
+                        "text": "the deploy is stuck on staging",
+                    }
+                ],
+            },
+            bot_uid="U_BOT",
+        )
+
+        assert "the deploy is stuck on staging" in rendered
+        assert "Forwarded message" in rendered
+
+    def test_hydration_forwarded_message_without_author_id_fails_open(self, adapter):
+        """No ``author_id`` on the unfurl → keep the content, never drop it."""
+        rendered = adapter._render_message_text(
+            {
+                "text": "",
+                "attachments": [
+                    {"is_msg_unfurl": True, "text": "unattributed forwarded content"}
+                ],
+            },
+            bot_uid="U_BOT",
+        )
+
+        assert "unattributed forwarded content" in rendered
+        assert "Forwarded message" in rendered
 
     # -- Block Kit payload dump --------------------------------------------
 
@@ -5865,3 +5907,215 @@ class TestSlackAuthoredTextDeduplication:
         assert "Deploy failed" in payload
         assert "rollback" in payload
         assert "Roll back" in payload
+
+
+class TestForwardedMessageText:
+    """#96384 — a human-forwarded Slack message keeps its text."""
+
+    def _forward_event(self, attachment, **overrides):
+        event = {
+            "text": "",
+            "user": "U_USER",
+            "channel": "D123",
+            "channel_type": "im",
+            "ts": "2000.0",
+            "attachments": [attachment],
+        }
+        event.update(overrides)
+        return event
+
+    @pytest.mark.asyncio
+    async def test_forwarded_message_text_reaches_agent(self, adapter):
+        """A human forwarding another user's message must not be dropped."""
+        event = self._forward_event(
+            {
+                "is_share": True,
+                "author_id": "U_OTHER",
+                "author_name": "Alice",
+                "text": "the deploy is stuck on staging",
+                "channel_id": "C_OTHER",
+            }
+        )
+
+        with patch.object(
+            adapter, "_resolve_user_name", new=AsyncMock(return_value="Bob")
+        ):
+            await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "the deploy is stuck on staging" in msg_event.text
+        assert "Forwarded message" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_self_permalink_echo_still_skipped(self, adapter):
+        """The bot's own message getting auto-unfurled is still suppressed."""
+        event = self._forward_event(
+            {
+                "is_msg_unfurl": True,
+                "author_id": "U_BOT",
+                "text": "some prior reply I posted",
+            },
+            text="check this out",
+            ts="2001.0",
+        )
+
+        with patch.object(
+            adapter, "_resolve_user_name", new=AsyncMock(return_value="Bob")
+        ):
+            await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "some prior reply I posted" not in msg_event.text
+        assert "check this out" in msg_event.text
+
+    @pytest.mark.asyncio
+    async def test_forwarded_message_with_missing_author_id_fails_open(self, adapter):
+        """No ``author_id`` on the unfurl → content is kept, not dropped."""
+        event = self._forward_event(
+            {"is_msg_unfurl": True, "text": "unattributed forwarded content"},
+            ts="2002.0",
+        )
+
+        with patch.object(
+            adapter, "_resolve_user_name", new=AsyncMock(return_value="Bob")
+        ):
+            await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "unattributed forwarded content" in msg_event.text
+
+
+class TestForwardedMessageFiles:
+    """#75481 — files nested in a forwarded/shared attachment are processed."""
+
+    def _make_event(self, files=None, attachments=None, text="hello"):
+        return {
+            "text": text,
+            "user": "U_USER",
+            "channel": "D123",
+            "channel_type": "im",
+            "ts": "1234567890.000001",
+            "files": files or [],
+            "blocks": [],
+            "attachments": attachments or [],
+        }
+
+    @pytest.mark.asyncio
+    async def test_forwarded_message_file_is_downloaded(self, adapter):
+        """A file nested in an ``is_share`` attachment is handled like a direct one."""
+        pdf_bytes = b"%PDF-1.4 forwarded content"
+
+        with patch.object(
+            adapter, "_download_slack_file_bytes", new_callable=AsyncMock
+        ) as dl:
+            dl.return_value = pdf_bytes
+            event = self._make_event(
+                attachments=[
+                    {
+                        "is_share": True,
+                        "author_id": "U_OTHER",
+                        "files": [
+                            {
+                                "mimetype": "application/pdf",
+                                "name": "forwarded.pdf",
+                                "url_private_download": "https://files.slack.com/forwarded.pdf",
+                                "size": len(pdf_bytes),
+                            }
+                        ],
+                    }
+                ]
+            )
+            await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.message_type == MessageType.DOCUMENT
+        assert len(msg_event.media_urls) == 1
+        assert msg_event.media_types == ["application/pdf"]
+
+    @pytest.mark.asyncio
+    async def test_forwarded_message_stub_file_hydrated_via_files_info(self, adapter):
+        """A Slack Connect stub file inside a forwarded attachment is hydrated."""
+        pdf_bytes = b"%PDF-1.4 stub content"
+        adapter._app.client.files_info = AsyncMock(
+            return_value={
+                "ok": True,
+                "file": {
+                    "mimetype": "application/pdf",
+                    "name": "stub.pdf",
+                    "url_private_download": "https://files.slack.com/stub.pdf",
+                    "size": len(pdf_bytes),
+                },
+            }
+        )
+
+        with patch.object(
+            adapter, "_download_slack_file_bytes", new_callable=AsyncMock
+        ) as dl:
+            dl.return_value = pdf_bytes
+            event = self._make_event(
+                attachments=[
+                    {
+                        "is_share": True,
+                        "author_id": "U_OTHER",
+                        "files": [{"id": "F0STUB", "file_access": "check_file_info"}],
+                    }
+                ]
+            )
+            await adapter._handle_slack_message(event)
+
+        adapter._app.client.files_info.assert_awaited_once_with(file="F0STUB")
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert len(msg_event.media_urls) == 1
+
+    @pytest.mark.asyncio
+    async def test_self_echo_unfurl_files_are_not_folded(self, adapter):
+        """The bot's own unfurled message is an echo — its files stay out."""
+        with patch.object(
+            adapter, "_download_slack_file_bytes", new_callable=AsyncMock
+        ) as dl:
+            event = self._make_event(
+                attachments=[
+                    {
+                        "is_msg_unfurl": True,
+                        "author_id": "U_BOT",
+                        "files": [
+                            {
+                                "mimetype": "application/pdf",
+                                "name": "our-own.pdf",
+                                "url_private_download": "https://files.slack.com/our-own.pdf",
+                            }
+                        ],
+                    }
+                ]
+            )
+            await adapter._handle_slack_message(event)
+
+        dl.assert_not_awaited()
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.media_urls == []
+
+    @pytest.mark.asyncio
+    async def test_non_share_attachment_files_are_ignored(self, adapter):
+        """A link-unfurl attachment must not leak unrelated nested files."""
+        with patch.object(
+            adapter, "_download_slack_file_bytes", new_callable=AsyncMock
+        ) as dl:
+            event = self._make_event(
+                attachments=[
+                    {
+                        "title": "Some link preview",
+                        "files": [
+                            {
+                                "mimetype": "application/pdf",
+                                "name": "unrelated.pdf",
+                                "url_private_download": "https://files.slack.com/unrelated.pdf",
+                            }
+                        ],
+                    }
+                ]
+            )
+            await adapter._handle_slack_message(event)
+
+        dl.assert_not_awaited()
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.media_urls == []
