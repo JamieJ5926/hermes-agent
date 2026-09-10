@@ -212,6 +212,10 @@ def _install_fake_openwakeword(monkeypatch):
     monkeypatch.setitem(sys.modules, "openwakeword", oww)
     monkeypatch.setitem(sys.modules, "openwakeword.model", model_mod)
     monkeypatch.setattr("tools.lazy_deps.ensure", lambda *a, **k: None)
+    # The fake stack declares the interpreter present too: on macOS ARM64 the
+    # engine defaults to the tflite framework and refuses to build without its
+    # runtime, which is a separate contract from the one under test here.
+    monkeypatch.setattr(ww, "ensure_tflite_runtime", lambda: True)
     return calls
 
 
