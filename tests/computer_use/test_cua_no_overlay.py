@@ -11,6 +11,7 @@ probe), not specific config snapshots.
 """
 
 import os
+import sys
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
@@ -241,6 +242,16 @@ class TestEmbeddedDaemonOverlayFlag:
         ), patch.object(
             cua_backend, "_cua_driver_supports_no_overlay", return_value=True,
         ), patch.object(
+            # macOS wraps the launch in `open -a CuaDriver.app --args` and
+            # validates the bundle signature first. Patch both so the test
+            # runs on the host it is actually on instead of demanding a real
+            # CuaDriver.app install. The wrapping itself is covered by
+            # tests/tools/test_computer_use_cua_macos_identity.py.
+            cua_backend, "_resolve_cua_driver_app_path",
+            return_value="/Applications/CuaDriver.app",
+        ), patch.object(
+            cua_backend, "_validate_cua_driver_app_signature",
+        ), patch.object(
             cua_backend.subprocess, "Popen", return_value=process,
         ) as popen, patch.object(
             cua_backend.subprocess, "run", return_value=status,
@@ -248,5 +259,20 @@ class TestEmbeddedDaemonOverlayFlag:
             daemon.start()
 
         command = popen.call_args.args[0]
-        assert command[:2] == ["/usr/bin/cua-driver", "serve"]
+        # The driver binary is argv[0] only where the launch is not routed
+        # through CuaDriver.app.
+        if sys.platform == "darwin":
+            assert command[:5] == [
+                "/usr/bin/open",
+                "-n",
+                "-g",
+                "-a",
+                "/Applications/CuaDriver.app",
+            ]
+            assert command[5] == "--args"
+        else:
+            assert command[:2] == ["/usr/bin/cua-driver", "serve"]
+        # The flag must be a serve argument, i.e. appended before the macOS
+        # app-launch wrapping, not a stray launcher argument.
         assert "--no-overlay" in command
+        assert command.index("--no-overlay") > command.index("serve")
