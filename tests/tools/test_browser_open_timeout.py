@@ -115,6 +115,10 @@ class TestCommandTimeoutRecovery:
         monkeypatch.setattr(bt, "_write_owner_pid", lambda *_args: None)
         monkeypatch.setattr(bt, "_build_browser_env", lambda: {})
         monkeypatch.setattr(bt, "_merge_browser_path", lambda value: value)
+        # The command path bails out early when no Chromium is installed on
+        # this host; this test is about the timeout/replacement contract, so
+        # declare the browser present.
+        monkeypatch.setattr(bt, "_chromium_installed", lambda: True)
         monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: process)
         monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
 
