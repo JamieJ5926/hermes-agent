@@ -896,11 +896,18 @@ class TestFTS5Search:
         ]
         assert all("context" in row and row["context"] for row in default)
 
-    def test_search_projection_skips_context_enrichment_queries(self, db):
+    def test_search_projection_skips_context_enrichment_queries(self, db, monkeypatch):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="before")
         db.append_message("s1", role="assistant", content="projectionneedle")
         db.append_message("s1", role="user", content="after")
+
+        # Under WAL the search path checks a FRESH pooled read connection out
+        # for every query, so tracing the writer connection (plus one throwaway
+        # read connection) misses the enrichment query entirely and the count
+        # reads 0 on a host where WAL is active. Pin the documented
+        # single-connection fallback so the trace covers what actually runs.
+        monkeypatch.setattr(db, "_checkout_read_conn", lambda: None)
 
         statements = []
         read_conn = db._get_read_conn() or db._conn
