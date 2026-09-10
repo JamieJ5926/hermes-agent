@@ -16303,6 +16303,13 @@ def test_model_options_preserves_canonical_custom_row_after_agent_init(monkeypat
     )
     monkeypatch.setattr("hermes_cli.inventory._apply_pricing", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("hermes_cli.inventory._apply_capabilities", lambda *_args, **_kwargs: None)
+    # explicit_only keeps an anthropic row when the host is signed into an
+    # Anthropic OAuth (Claude Code / Hermes device flow). That is real state,
+    # not this fixture's subject, so pin it off to keep the expected row set
+    # about the custom provider surviving agent init.
+    monkeypatch.setattr(
+        "hermes_cli.inventory._anthropic_oauth_credentials_present", lambda: False
+    )
 
     resp = server._methods["model.options"](
         102,
