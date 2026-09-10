@@ -39,8 +39,16 @@ def test_real_read_tool_binaries_confirm_option_ownership(
         ("rg", ["--hostname-bin=-payload-marker", "needle", "{input}"], None, False),
         ("sort", ["--buffer-size=1K", "--compress-program", "-payload-marker"], "{bulk}", False),
         ("ag", ["--pager=-payload-marker", "needle", "{input}"], None, True),
-        ("man", ["--pager", "-payload-marker", "ls"], None, True),
-        ("man", ["-P", "-payload-marker", "ls"], None, True),
+        # The tty wrapper below is util-linux ``script -c``; BSD script (macOS)
+        # has no -c, so the pager never launches there.
+        pytest.param(
+            "man", ["--pager", "-payload-marker", "ls"], None, True,
+            marks=pytest.mark.linux_only,
+        ),
+        pytest.param(
+            "man", ["-P", "-payload-marker", "ls"], None, True,
+            marks=pytest.mark.linux_only,
+        ),
     ],
 )
 def test_real_binaries_execute_leading_dash_program_payload(
@@ -72,7 +80,18 @@ def test_real_binaries_execute_leading_dash_program_payload(
     if needs_tty:
         argv = ["script", "-qec", shlex.join(argv), "/dev/null"]
 
-    subprocess.run(argv, input=input_text, text=True, capture_output=True, env=env, timeout=20)
+    # The payload ends in ``cat``, so it needs EOF on stdin. Inheriting the
+    # runner's stdin hangs the child wherever that stream stays open; the
+    # explicit bulk case still feeds its own input.
+    subprocess.run(
+        argv,
+        input=input_text,
+        stdin=subprocess.DEVNULL if input_text is None else None,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=20,
+    )
 
     assert marker.read_text() == "executed"
 
