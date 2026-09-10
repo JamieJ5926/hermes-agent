@@ -1875,7 +1875,7 @@ class TestReaderLoopOrphanedPipe:
 # =========================================================================
 # systemd cgroup isolation for gateway-spawned local executors (#70716)
 # =========================================================================
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: systemd scopes")
+@pytest.mark.linux_only  # systemd-run --user --scope is gated on _IS_LINUX
 class TestSystemdCgroupIsolation:
     """Verify spawn_local wraps the worker in ``systemd-run --user --scope``
     when running under a supervisor and systemd-run is available, and falls
