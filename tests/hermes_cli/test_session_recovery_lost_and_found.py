@@ -220,6 +220,14 @@ def test_unreadable_schema_without_cli_names_the_sqlite3_requirement(
     import hermes_cli.session_lost_and_found as laf
 
     monkeypatch.setattr(laf, "find_sqlite3_cli", lambda: None)
+    # ``find_sqlite3_cli`` is also what resets the process-global refusal
+    # record, so stubbing only the finder leaves whatever refusal an earlier
+    # call in this process recorded. On a host whose sqlite3 shell is
+    # WAL-reset vulnerable that stale record selects the wrong branch and the
+    # refusal names the shell instead of the install guidance.
+    monkeypatch.setattr(
+        laf, "find_sqlite3_cli_refusal", lambda: {"reason": "missing"}
+    )
     with pytest.raises(SessionRecoverySourceError) as excinfo:
         recover_session_database(
             source,
