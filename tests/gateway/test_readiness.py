@@ -4,7 +4,9 @@ import json
 import os
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
+from gateway import readiness
 from gateway.readiness import collect_runtime_readiness
 
 
@@ -18,6 +20,15 @@ def test_collect_runtime_readiness_reports_healthy_local_runtime(tmp_path, monke
     with sqlite3.connect(home / "state.db") as conn:
         conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    # The disk probe reads the real mount, so a host that happens to sit over
+    # the 90% degradation threshold would drag the aggregate status down and
+    # fail this assertion for reasons unrelated to the readiness logic under
+    # test. Pin the mount's usage so the verdict is deterministic.
+    monkeypatch.setattr(
+        readiness.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=1_000, used=100, free=900),
+    )
 
     result = collect_runtime_readiness(
         configured_model="test/model",
