@@ -71,6 +71,15 @@ SSE_RETRY_DELAY_INITIAL = 2.0
 SSE_RETRY_DELAY_MAX = 60.0
 HEALTH_CHECK_INTERVAL = 30.0  # seconds between health checks
 HEALTH_CHECK_STALE_THRESHOLD = 120.0  # seconds without SSE activity before concern
+# signal-cli-rest-api serves its daemon health probe at GET /v1/health and
+# answers 204 No Content on success; there is no /api/v1/check route in the
+# published Swagger, so the old probe never passed. Open question (unverified
+# without a live daemon): whether the sibling /api/v1/* paths — the SSE feed
+# (/api/v1/events) and the outbound RPC POST (/api/v1/rpc) — are also wrong.
+# Only the health URL is corrected here; the transport is left alone.
+# Ref: NousResearch/hermes-agent#69310.
+HEALTH_CHECK_PATH = "/v1/health"
+HEALTH_CHECK_OK_STATUSES = (200, 204)  # 204 per the docs; 200 tolerated for proxies
 
 
 # ---------------------------------------------------------------------------
@@ -391,8 +400,10 @@ class SignalAdapter(BasePlatformAdapter):
         try:
             # Health check — verify signal-cli daemon is reachable
             try:
-                resp = await self.client.get(f"{self.http_url}/api/v1/check", timeout=10.0)
-                if resp.status_code != 200:
+                resp = await self.client.get(
+                    f"{self.http_url}{HEALTH_CHECK_PATH}", timeout=10.0
+                )
+                if resp.status_code not in HEALTH_CHECK_OK_STATUSES:
                     logger.error("Signal: health check failed (status %d)", resp.status_code)
                     return False
             except Exception as e:
@@ -532,9 +543,9 @@ class SignalAdapter(BasePlatformAdapter):
                 logger.warning("Signal: SSE idle for %.0fs, checking daemon health", elapsed)
                 try:
                     resp = await self.client.get(
-                        f"{self.http_url}/api/v1/check", timeout=10.0
+                        f"{self.http_url}{HEALTH_CHECK_PATH}", timeout=10.0
                     )
-                    if resp.status_code == 200:
+                    if resp.status_code in HEALTH_CHECK_OK_STATUSES:
                         # Daemon is alive but SSE is idle — update activity to
                         # avoid repeated warnings (connection may just be quiet)
                         self._last_sse_activity = time.time()

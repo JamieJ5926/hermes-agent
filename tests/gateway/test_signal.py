@@ -103,6 +103,44 @@ class TestSignalConnectCleanup:
         assert adapter._platform_lock_identity is None
 
 
+class TestSignalHealthCheck:
+    """Regression for NousResearch/hermes-agent#69310.
+
+    The daemon probe must hit the documented ``GET /v1/health`` (204 No
+    Content). The previous ``GET /api/v1/check`` is not served by
+    signal-cli-rest-api, so a correctly configured daemon never connected.
+    """
+
+    @pytest.mark.asyncio
+    async def test_connect_probes_v1_health_and_accepts_204(self, monkeypatch):
+        adapter = _make_signal_adapter(monkeypatch)
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=MagicMock(status_code=204))
+        mock_client.aclose = AsyncMock()
+
+        async def _noop(*_args, **_kwargs):
+            return None
+
+        # Keep the test on the connect() path: the SSE listener would
+        # otherwise spin against the mocked client.
+        monkeypatch.setattr(type(adapter), "_sse_listener", _noop)
+        monkeypatch.setattr(type(adapter), "_health_monitor", _noop)
+
+        with patch("gateway.platforms.signal.httpx.AsyncClient", return_value=mock_client), \
+             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("gateway.status.release_scoped_lock"):
+            result = await adapter.connect()
+
+        assert result is True
+        assert mock_client.get.await_count == 1
+        url = mock_client.get.await_args.args[0]
+        assert url == "http://localhost:8080/v1/health"
+        assert "/api/v1/check" not in url
+
+        await adapter.disconnect()
+
+
 class TestSignalHelpers:
     def test_redact_phone_long(self):
         from gateway.platforms.helpers import redact_phone
