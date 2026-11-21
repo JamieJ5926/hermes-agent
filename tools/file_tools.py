@@ -985,6 +985,31 @@ def _collect_v4a_header_paths(patch: str) -> tuple[list[str], list[str], list[st
     return paths, content_paths, entry_paths
 
 
+def _sibling_write_refusal(paths: list[str], path_to_resolved: dict, task_id: str) -> dict | None:
+    """Refusal payload when a sibling subagent's write makes a patch stale, else
+    ``None``. Checked under the per-path locks and before any mutation: a stale
+    patch would re-apply the sibling's change (#158375), where mtime drift and
+    partial reads stay warnings. Shaped like ``_stale_write_refusal``."""
+    for p in paths:
+        resolved = path_to_resolved.get(p)
+        sibling = file_state.check_sibling_write(task_id, resolved) if resolved else None
+        if not sibling:
+            continue
+        refusal = {
+            "error": (
+                f"Refusing to patch {p}: {sibling} "
+                "The file was NOT modified. Re-read the current contents "
+                "with read_file, merge the requested change against the "
+                "sibling's edit, then call patch again."),
+            "stale_write_blocked": True,
+            "path": p,
+        }
+        if resolved:
+            refusal["resolved_path"] = resolved
+        return refusal
+    return None
+
+
 def patch_tool(mode: str = "replace", path: str | None = None, old_string: str | None = None,
                new_string: str | None = None, replace_all: bool = False, patch: str | None = None,
                task_id: str = "default", cross_profile: bool = False,
@@ -1019,22 +1044,9 @@ def patch_tool(mode: str = "replace", path: str | None = None, old_string: str |
             # A sibling subagent's write after this task's last read refuses HERE —
             # before the patch — because the patch would re-apply the sibling's
             # change. Mtime drift and partial-read findings stay warnings below.
-            for _p in _content_write_paths:
-                _sib_resolved = _path_to_resolved.get(_p)
-                _sibling = file_state.check_sibling_write(task_id, _sib_resolved) if _sib_resolved else None
-                if _sibling:
-                    _refusal = {
-                        "error": (
-                            f"Refusing to patch {_p}: {_sibling} "
-                            "The file was NOT modified. Re-read the current contents "
-                            "with read_file, merge the requested change against the "
-                            "sibling's edit, then call patch again."),
-                        "stale_write_blocked": True,
-                        "path": _p,
-                    }
-                    if _sib_resolved:
-                        _refusal["resolved_path"] = _sib_resolved
-                    return json.dumps(_refusal, ensure_ascii=False)
+            _sibling_refusal = _sibling_write_refusal(_content_write_paths, _path_to_resolved, task_id)
+            if _sibling_refusal:
+                return json.dumps(_sibling_refusal, ensure_ascii=False)
             stale_warnings = _edit_warnings(_paths_to_check, _path_to_resolved, task_id)
             file_ops = _get_file_ops(task_id)
             # Whole-file knowledge held BEFORE the patch reads, under the same locks. Like
