@@ -127,11 +127,46 @@ class FileStateRegistry:
             _evict_oldest(self._last_writer, _MAX_GLOBAL_WRITERS)
             self._stamp(task_id, resolved, mtime, now, False)
 
+    def check_sibling_write(self, task_id: str, resolved: str) -> Optional[str]:
+        """Cross-agent finding only: a sibling subagent wrote ``resolved`` after
+        this task's last read (or before this task ever read it), else ``None``.
+        ``patch_tool`` refuses on this finding before mutating the file — a stale
+        patch would re-apply the sibling's change — while mtime drift, partial
+        reads and never-read stay warnings there (see ``check_stale``)."""
+        if _disabled():
+            return None
+        with self._state_lock:
+            stamp = self._reads.get(task_id, {}).get(resolved)
+            last_writer = self._last_writer.get(resolved)
+
+        if last_writer is None:
+            return None
+        writer_tid, writer_ts = last_writer
+        if writer_tid == task_id:
+            return None
+        if stamp is None:
+            return (
+                f"{resolved} was modified by sibling subagent "
+                f"{writer_tid!r} but this agent never read it. "
+                "Read the file before writing to avoid overwriting "
+                "the sibling's changes.")
+        read_ts = stamp[1]
+        if writer_ts > read_ts:
+            return (
+                f"{resolved} was modified by sibling subagent "
+                f"{writer_tid!r} at {_fmt_ts(writer_ts)} — after "
+                f"this agent's last read at {_fmt_ts(read_ts)}. "
+                "Re-read the file before writing.")
+        return None
+
     def check_stale(self, task_id: str, resolved: str) -> Optional[str]:
         """Model-facing warning if this write would be stale, else ``None``. Severity
         order: sibling wrote after our read > mtime drift / partial read > never read."""
         if _disabled():
             return None
+        sibling = self.check_sibling_write(task_id, resolved)
+        if sibling:
+            return sibling
         with self._state_lock:
             stamp = self._reads.get(task_id, {}).get(resolved)
             last_writer = self._last_writer.get(resolved)
@@ -141,23 +176,6 @@ class FileStateRegistry:
         current_mtime = _mtime_or_none(resolved)
         if current_mtime is None:
             return None  # file doesn't exist — write creates it; not stale
-
-        if last_writer is not None:
-            writer_tid, writer_ts = last_writer
-            if writer_tid != task_id:
-                if stamp is None:
-                    return (
-                        f"{resolved} was modified by sibling subagent "
-                        f"{writer_tid!r} but this agent never read it. "
-                        "Read the file before writing to avoid overwriting "
-                        "the sibling's changes.")
-                read_ts = stamp[1]
-                if writer_ts > read_ts:
-                    return (
-                        f"{resolved} was modified by sibling subagent "
-                        f"{writer_tid!r} at {_fmt_ts(writer_ts)} — after "
-                        f"this agent's last read at {_fmt_ts(read_ts)}. "
-                        "Re-read the file before writing.")
 
         if stamp is not None:
             read_mtime, _read_ts, partial = stamp
@@ -240,6 +258,10 @@ def check_stale(task_id: str, resolved_or_path: str | Path) -> Optional[str]:
     return _registry.check_stale(task_id, str(resolved_or_path))
 
 
+def check_sibling_write(task_id: str, resolved_or_path: str | Path) -> Optional[str]:
+    return _registry.check_sibling_write(task_id, str(resolved_or_path))
+
+
 def lock_path(resolved_or_path: str | Path):
     return _registry.lock_path(str(resolved_or_path))
 
@@ -254,6 +276,7 @@ def known_reads(task_id: str) -> list[str]:
 
 __all__ = [
     "FileStateRegistry",
+    "check_sibling_write",
     "check_stale",
     "get_registry",
     "known_reads",

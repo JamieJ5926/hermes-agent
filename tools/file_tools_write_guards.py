@@ -8,6 +8,9 @@ deny), ``_check_binary_document_write``, ``_check_protected_instruction_write``
 ``_check_cross_profile_path`` (sandbox-mirror lost-work), ``_is_internal_file_tool_content``.
 ``_stale_overwrite_blocker`` (write_file only, under the per-path lock) refuses a
 whole-file overwrite of content this task never saw or that changed since.
+``patch_tool`` refuses only the cross-agent sibling finding, via
+``file_state.check_sibling_write`` — a stale patch would re-apply the sibling's
+change — while mtime drift and partial reads stay warnings there.
 """
 
 import fnmatch

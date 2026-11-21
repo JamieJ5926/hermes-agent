@@ -1016,6 +1016,25 @@ def patch_tool(mode: str = "replace", path: str | None = None, old_string: str |
         with ExitStack() as _locks:
             for _r in sorted({_r for _r in (*_path_to_resolved.values(), *_path_to_entry.values()) if _r}):
                 _locks.enter_context(file_state.lock_path(_r))
+            # A sibling subagent's write after this task's last read refuses HERE —
+            # before the patch — because the patch would re-apply the sibling's
+            # change. Mtime drift and partial-read findings stay warnings below.
+            for _p in _content_write_paths:
+                _sib_resolved = _path_to_resolved.get(_p)
+                _sibling = file_state.check_sibling_write(task_id, _sib_resolved) if _sib_resolved else None
+                if _sibling:
+                    _refusal = {
+                        "error": (
+                            f"Refusing to patch {_p}: {_sibling} "
+                            "The file was NOT modified. Re-read the current contents "
+                            "with read_file, merge the requested change against the "
+                            "sibling's edit, then call patch again."),
+                        "stale_write_blocked": True,
+                        "path": _p,
+                    }
+                    if _sib_resolved:
+                        _refusal["resolved_path"] = _sib_resolved
+                    return json.dumps(_refusal, ensure_ascii=False)
             stale_warnings = _edit_warnings(_paths_to_check, _path_to_resolved, task_id)
             file_ops = _get_file_ops(task_id)
             # Whole-file knowledge held BEFORE the patch reads, under the same locks. Like

@@ -284,6 +284,38 @@ class TestPatchStaleness(unittest.TestCase):
         ))
         self.assertNotIn("_warning", result)
 
+    def test_patch_refuses_before_mutation_when_sibling_modified(self):
+        """read by A and B → A patches (a sibling write) → B's stale patch is
+        refused untouched with ``stale_write_blocked`` instead of re-applying
+        the sibling's change; re-reading heals B's baseline and the next patch
+        lands. Mirrors write_file's pre-mutation refusal (#158375)."""
+        self.assertNotIn("error", json.loads(read_file_tool(self._tmpfile, task_id="pa")))
+        self.assertNotIn("error", json.loads(read_file_tool(self._tmpfile, task_id="pb")))
+
+        self.assertNotIn("error", json.loads(patch_tool(
+            mode="replace", path=self._tmpfile,
+            old_string="original line", new_string="A added a line\noriginal line",
+            task_id="pa")))
+
+        refused = json.loads(patch_tool(
+            mode="replace", path=self._tmpfile,
+            old_string="original line", new_string="B duplicated\noriginal line",
+            task_id="pb"))
+        self.assertTrue(refused.get("stale_write_blocked"), refused)
+        self.assertIn("sibling", refused["error"].lower())
+        self.assertIn("pa", refused["error"])
+        with open(self._tmpfile) as f:
+            self.assertNotIn("B duplicated", f.read())
+
+        self.assertNotIn("error", json.loads(read_file_tool(self._tmpfile, task_id="pb")))
+        merged = json.loads(patch_tool(
+            mode="replace", path=self._tmpfile,
+            old_string="original line", new_string="B merged\noriginal line",
+            task_id="pb"))
+        self.assertNotIn("error", merged, merged)
+        with open(self._tmpfile) as f:
+            self.assertIn("B merged", f.read())
+
 
 # ---------------------------------------------------------------------------
 # Unit test for the helper
