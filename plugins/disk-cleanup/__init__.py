@@ -1,7 +1,8 @@
 """disk-cleanup plugin — auto-cleanup of ephemeral Hermes session files.
 
 ``pre_tool_call`` + ``post_tool_call`` silently track test/temp paths CREATED by write_file/patch/terminal;
-``on_session_end`` runs :func:`disk_cleanup.quick` when any test file was tracked this turn;
+``on_session_end`` runs :func:`disk_cleanup.quick` scoped to the ending session's own tracked paths
+(no other live session's or child task's files) when any test file was tracked this turn;
 ``/disk-cleanup`` exposes status / dry-run / quick / deep / track / forget.
 """
 
@@ -23,9 +24,10 @@ from . import disk_cleanup as dg
 logger = logging.getLogger(__name__)
 
 
-# Test files newly tracked this turn, keyed by task_id (or session_id) so on_session_end can
-# decide whether to run cleanup. Locked: post_tool_call fires concurrently on parallel calls.
-_recent_test_tracks: dict[str, set[str]] = {}
+# Test files newly tracked this turn, keyed by session then owner (task_id or session_id) so
+# on_session_end can drain exactly that session's own buckets and never another session's.
+# Locked: post_tool_call fires concurrently on parallel calls.
+_recent_test_tracks: dict[str, dict[str, set[str]]] = {}
 _lock = threading.Lock()
 
 
@@ -118,26 +120,34 @@ def _on_post_tool_call(tool_name: str = "", args: Optional[dict[str, Any]] = Non
         category = dg.guess_category(p) if created else None
         if category is not None and dg.track(str(p), category, silent=True) and category == "test":
             with _lock:
-                _recent_test_tracks.setdefault(_owner(task_id, session_id), set()).add(str(p))
+                _recent_test_tracks.setdefault(session_id or "default", {}).setdefault(
+                    _owner(task_id, session_id), set()).add(str(p))
 
 
 def _on_session_end(
-    session_id: str = "", completed: bool = True, interrupted: bool = False, **_: Any) -> None:
-    """Run quick cleanup if any test files were tracked during this turn."""
-    # Drain the session bucket plus every task-scoped bucket (subagents record into their own).
+    session_id: str = "", task_id: str = "", completed: bool = True, interrupted: bool = False,
+    **_: Any) -> None:
+    """Run quick cleanup for THIS session's tracked files only. The hook fires at every turn end
+    (not at session close) and one process serves several sessions and child tasks at once, so
+    draining other sessions' buckets or sweeping the profile here deleted their just-written
+    files (#158602). A per-turn end (the dispatcher always sends task_id) drains exactly that
+    owner's bucket; a session-only end (CLI shutdown/interrupt) drains every bucket this
+    session recorded, its child tasks included — never another session's."""
     with _lock:
-        had_tracks = bool(_recent_test_tracks.pop(session_id or "default", None) or _recent_test_tracks)
-        _recent_test_tracks.clear()
-    if not had_tracks:
+        session_buckets = _recent_test_tracks.pop(session_id or "default", None) or {}
+        paths = session_buckets.get(_owner(task_id, session_id)) if task_id else None
+        if paths is None:
+            paths = set().union(*session_buckets.values()) if session_buckets else set()
+    if not paths:
         return
     try:
-        summary = dg.quick()
+        summary = dg.quick(paths=paths)
     except Exception as exc:
         logger.debug("disk-cleanup quick cleanup failed: %s", exc)
         return
-    if summary["deleted"] or summary["empty_dirs"]:
+    if summary["deleted"]:
         dg._log(f"AUTO_QUICK (session_end): deleted={summary['deleted']} "
-                f"dirs={summary['empty_dirs']} freed={dg.fmt_size(summary['freed'])}")
+                f"freed={dg.fmt_size(summary['freed'])}")
 
 
 _HELP_TEXT = """\

@@ -269,8 +269,14 @@ def dry_run() -> tuple[list[dict], list[dict]]:
     return auto, prompt
 
 
-def quick() -> dict[str, Any]:
-    """Safe deterministic cleanup — no prompts. Returns ``{deleted, empty_dirs, freed, errors}``."""
+def quick(paths: Optional[set[str]] = None) -> dict[str, Any]:
+    """Safe deterministic cleanup — no prompts. Returns ``{deleted, empty_dirs, freed, errors}``.
+
+    With *paths*, delete only those tracked entries — one owner's turn-end
+    cleanup (#158602): the hook fires per turn in a process that serves several
+    sessions — and leave every other owner's entries and the empty-dir sweep
+    untouched.
+    """
     deleted = freed = 0
     new_tracked: list[dict] = []
     errors: list[str] = []
@@ -279,6 +285,10 @@ def quick() -> dict[str, Any]:
         if cat in _STALE_SKIP_NOTE and (re_cat := guess_category(p)) != cat:
             # Misclassified stale entry — drop it rather than delete the file.
             _log(f"SKIP stale {cat} entry: {p} (re-classified as {re_cat!r}{_STALE_SKIP_NOTE[cat]})")
+            continue
+        if paths is not None and item["path"] not in paths:
+            # Another live owner's entry: keep it tracked, never delete it from this callback.
+            new_tracked.append(item)
             continue
         # Hard safety net even if re-validation above somehow let it through.
         if _is_protected_cron_path(p):
@@ -297,7 +307,7 @@ def quick() -> dict[str, Any]:
         else:
             errors.append(err)
             new_tracked.append(item)
-    empty_removed = _sweep_empty_dirs(get_hermes_home())
+    empty_removed = 0 if paths is not None else _sweep_empty_dirs(get_hermes_home())
     save_tracked(new_tracked)
     _log(f"QUICK_SUMMARY: {deleted} files, {empty_removed} dirs, {fmt_size(freed)}")
     return {"deleted": deleted, "empty_dirs": empty_removed, "freed": freed, "errors": errors}

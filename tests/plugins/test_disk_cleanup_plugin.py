@@ -635,6 +635,9 @@ class TestPostToolCallHook:
         pi._on_session_end(session_id="sA", completed=True, interrupted=False)
 
         assert user_file.read_text() == "keep"
+        # A's turn end only drains A's own bucket (#158602): B's tracked file waits for B's end.
+        assert new_file.exists()
+        pi._on_session_end(session_id="sB", completed=True, interrupted=False)
         assert not new_file.exists()
 
 
@@ -647,6 +650,37 @@ class TestOnSessionEndHook:
         assert p.exists()
         pi._on_session_end(session_id="s1", completed=True, interrupted=False)
         assert not p.exists(), "test file should be auto-deleted"
+
+    def test_session_end_only_cleans_that_sessions_files(self, _isolate_env):
+        """#158602: the hook fires at every turn end in a shared process. Session B ending must
+        not sweep session A's just-written test files; each owner's files go when it ends."""
+        pi = _load_plugin_init()
+        a = _isolate_env / "reviews" / "test_a.py"
+        b = _isolate_env / "scratch" / "test_b.py"
+        a.parent.mkdir()
+        b.parent.mkdir()
+        _run_tool(pi, "write_file", {"path": str(a), "content": "x"},
+                  create=lambda: a.write_text("x"), task_id="tA", session_id="sA")
+        _run_tool(pi, "write_file", {"path": str(b), "content": "x"},
+                  create=lambda: b.write_text("x"), task_id="tB", session_id="sB")
+
+        pi._on_session_end(session_id="sB", task_id="tB", completed=True, interrupted=False)
+        assert a.exists(), "another session's turn end must not delete A's file"
+        assert not b.exists()
+
+        pi._on_session_end(session_id="sA", task_id="tA", completed=True, interrupted=False)
+        assert not a.exists()
+
+    def test_child_task_bucket_drained_by_its_own_task_id(self, _isolate_env):
+        """A child task records into its task-scoped bucket (_owner prefers task_id); its turn
+        end carries the same task_id and drains exactly that bucket, not the parent session's."""
+        pi = _load_plugin_init()
+        child = _isolate_env / "test_child.py"
+        _run_tool(pi, "write_file", {"path": str(child), "content": "x"},
+                  create=lambda: child.write_text("x"), task_id="t_child", session_id="s_parent")
+        pi._on_session_end(session_id="s_parent", task_id="t_child",
+                           completed=True, interrupted=False)
+        assert not child.exists()
 
 
 
@@ -725,7 +759,7 @@ def test_deleted_or_renamed_profile_home_is_not_recreated(tmp_path, monkeypatch,
     for sub in ("forget /x", "quick", "deep"):
         assert "Profile 'b' no longer exists" in pi._handle_slash(sub)
     assert pi._handle_slash("track /x test").startswith("Not tracked")
-    pi._recent_test_tracks["s_dead"] = {"x"}
+    pi._recent_test_tracks["s_dead"] = {"s_dead": {"x"}}
     pi._on_session_end(session_id="s_dead")  # caught: the cleanup is skipped
     assert not home.exists()
 
