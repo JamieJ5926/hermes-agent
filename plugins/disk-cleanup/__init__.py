@@ -1,7 +1,7 @@
 """disk-cleanup plugin — auto-cleanup of ephemeral Hermes session files.
 
 ``pre_tool_call`` + ``post_tool_call`` silently track test/temp paths CREATED by write_file/patch/terminal;
-``on_session_end`` runs :func:`disk_cleanup.quick` when any test file was tracked this turn;
+``on_session_end`` deletes the test files THIS session tracked (other sessions' files stay);
 ``/disk-cleanup`` exposes status / dry-run / quick / deep / track / forget.
 """
 
@@ -23,8 +23,9 @@ from . import disk_cleanup as dg
 logger = logging.getLogger(__name__)
 
 
-# Test files newly tracked this turn, keyed by task_id (or session_id) so on_session_end can
-# decide whether to run cleanup. Locked: post_tool_call fires concurrently on parallel calls.
+# Test files newly tracked this session, keyed by SESSION id (task id only when the caller sent
+# no session id) so on_session_end drains exactly the ending session's bucket. Locked:
+# post_tool_call fires concurrently on parallel calls.
 _recent_test_tracks: dict[str, set[str]] = {}
 _lock = threading.Lock()
 
@@ -118,26 +119,30 @@ def _on_post_tool_call(tool_name: str = "", args: Optional[dict[str, Any]] = Non
         category = dg.guess_category(p) if created else None
         if category is not None and dg.track(str(p), category, silent=True) and category == "test":
             with _lock:
-                _recent_test_tracks.setdefault(_owner(task_id, session_id), set()).add(str(p))
+                _recent_test_tracks.setdefault(session_id or task_id or "default", set()).add(str(p))
 
 
 def _on_session_end(
-    session_id: str = "", completed: bool = True, interrupted: bool = False, **_: Any) -> None:
-    """Run quick cleanup if any test files were tracked during this turn."""
-    # Drain the session bucket plus every task-scoped bucket (subagents record into their own).
+    session_id: str = "", task_id: str = "", completed: bool = True,
+    interrupted: bool = False, **_: Any) -> None:
+    """Delete the test files THIS session tracked. Ending one session must not run the global
+    quick() sweep: that deleted every tracked test file in the profile, including files a
+    still-running session had just created (#158602)."""
+    keys = ["default"] if not session_id and not task_id else [k for k in (session_id, task_id) if k]
     with _lock:
-        had_tracks = bool(_recent_test_tracks.pop(session_id or "default", None) or _recent_test_tracks)
-        _recent_test_tracks.clear()
-    if not had_tracks:
+        paths: set[str] = set()
+        for key in keys:
+            paths |= _recent_test_tracks.pop(key, set())
+    if not paths:
         return
     try:
-        summary = dg.quick()
+        summary = dg.delete_tracked(paths)
     except Exception as exc:
-        logger.debug("disk-cleanup quick cleanup failed: %s", exc)
+        logger.debug("disk-cleanup session-end cleanup failed: %s", exc)
         return
-    if summary["deleted"] or summary["empty_dirs"]:
-        dg._log(f"AUTO_QUICK (session_end): deleted={summary['deleted']} "
-                f"dirs={summary['empty_dirs']} freed={dg.fmt_size(summary['freed'])}")
+    if summary["deleted"] or summary["errors"]:
+        dg._log(f"SESSION_END (session_end): deleted={summary['deleted']} "
+                f"freed={dg.fmt_size(summary['freed'])}")
 
 
 _HELP_TEXT = """\

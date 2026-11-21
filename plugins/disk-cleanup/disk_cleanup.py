@@ -15,7 +15,7 @@ import logging
 import shutil
 from datetime import datetime, timezone, UTC
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home, mkdir_under_hermes_home
 
@@ -301,6 +301,34 @@ def quick() -> dict[str, Any]:
     save_tracked(new_tracked)
     _log(f"QUICK_SUMMARY: {deleted} files, {empty_removed} dirs, {fmt_size(freed)}")
     return {"deleted": deleted, "empty_dirs": empty_removed, "freed": freed, "errors": errors}
+
+
+def delete_tracked(paths: Iterable[str]) -> dict[str, Any]:
+    """Delete exactly the given tracked paths and drop them from tracking. Session-scoped
+    cleanup: ending one session must not sweep files another live session just created, which
+    the global quick() sweep would. Returns the same summary shape as quick()."""
+    targets: set[str] = set()
+    for path_str in paths:
+        try:
+            targets.add(str(Path(path_str).expanduser().resolve()))
+        except (OSError, RuntimeError):
+            targets.add(path_str)
+    deleted = freed = 0
+    errors: list[str] = []
+    remaining: list[dict] = []
+    for item in load_tracked():
+        if str(Path(item["path"]).resolve()) in targets:
+            err = _delete_item(item)
+            if err is None:
+                freed += item["size"]
+                deleted += 1
+            else:
+                errors.append(err)
+                remaining.append(item)
+        else:
+            remaining.append(item)
+    save_tracked(remaining)
+    return {"deleted": deleted, "empty_dirs": 0, "freed": freed, "errors": errors}
 
 
 def _subdirs(dirpath: Path, exclude: frozenset) -> list[Path]:

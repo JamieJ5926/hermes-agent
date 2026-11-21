@@ -315,6 +315,10 @@ class TestProtectedDirsNeverRmtreed:
         assert att.exists(), "kanban attachments are task-managed, never auto-deleted"
         assert new_att.exists(), "kanban files a call created are never tracked or deleted"
         assert not scratch.exists(), "root-level scratch files are still cleaned up (control)"
+        # Session end is session-scoped (#158602): it deletes only this session's files, so the
+        # stale pre-fix kanban entry waits for quick()'s re-validation, which drops it.
+        assert len(dg.load_tracked()) == 1
+        assert dg.quick()["deleted"] == 0
         assert dg.load_tracked() == []
 
 
@@ -618,8 +622,7 @@ class TestPostToolCallHook:
     def test_a_call_never_uses_another_sessions_snapshot(self, _isolate_env):
         """tool_call_id is not unique: llama.cpp sends one constant id for every call. Session A
         patching the user's test_user.py must not consume session B's snapshot of a new file under
-        that id, or the user's file reads as created and is deleted when the turn ends; B's own
-        created file is still tracked and cleaned up."""
+        that id; each session's own end deletes only the files it created."""
         pi = _load_plugin_init()
         user_file = _isolate_env / "test_user.py"
         user_file.write_text("keep")
@@ -635,7 +638,9 @@ class TestPostToolCallHook:
         pi._on_session_end(session_id="sA", completed=True, interrupted=False)
 
         assert user_file.read_text() == "keep"
-        assert not new_file.exists()
+        assert new_file.exists(), "session A's end must not delete session B's tracked file"
+        pi._on_session_end(session_id="sB", completed=True, interrupted=False)
+        assert not new_file.exists(), "session B's own end deletes the file it created"
 
 
 class TestOnSessionEndHook:
@@ -647,6 +652,35 @@ class TestOnSessionEndHook:
         assert p.exists()
         pi._on_session_end(session_id="s1", completed=True, interrupted=False)
         assert not p.exists(), "test file should be auto-deleted"
+
+    def test_other_sessions_end_leaves_this_sessions_test_files(self, _isolate_env):
+        """#158602: session B ending without having tracked anything must not run the global
+        sweep — session A's fresh test file survives."""
+        pi = _load_plugin_init()
+        p_a = _isolate_env / "test_session_a.py"
+        _run_tool(pi, "write_file", {"path": str(p_a), "content": "x"},
+                  create=lambda: p_a.write_text("x = 1\n"), task_id="", session_id="sess_a")
+        assert p_a.exists()
+        pi._on_session_end(session_id="sess_b", completed=True, interrupted=False)
+        assert p_a.exists(), "another session's end deleted this session's test file"
+
+    def test_session_end_deletes_only_the_ending_sessions_files(self, _isolate_env):
+        """#158602: when B ends having tracked its own test file, B's end deletes B's file and
+        leaves A's still-active tracked file (and its tracking entry) untouched."""
+        pi = _load_plugin_init()
+        p_a = _isolate_env / "test_session_a.py"
+        p_b = _isolate_env / "test_session_b.py"
+        _run_tool(pi, "write_file", {"path": str(p_a), "content": "x"},
+                  create=lambda: p_a.write_text("x = 1\n"), task_id="", session_id="sess_a")
+        _run_tool(pi, "write_file", {"path": str(p_b), "content": "x"},
+                  create=lambda: p_b.write_text("x = 2\n"), task_id="", session_id="sess_b")
+        pi._on_session_end(session_id="sess_b", completed=True, interrupted=False)
+        assert not p_b.exists()
+        assert p_a.exists(), "session B's end deleted session A's tracked test file"
+        tracked = json.loads((_isolate_env / "disk-cleanup" / "tracked.json").read_text())
+        assert any(Path(i["path"]) == p_a.resolve() for i in tracked), "A's entry was dropped"
+        pi._on_session_end(session_id="sess_a", completed=True, interrupted=False)
+        assert not p_a.exists()
 
 
 
