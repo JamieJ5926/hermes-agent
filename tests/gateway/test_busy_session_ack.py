@@ -279,6 +279,74 @@ class TestBusySessionAck:
         assert "Steered" in content
         assert "Queued" not in content
 
+    @pytest.mark.asyncio
+    async def test_steer_mode_steers_captioned_photo_with_attachment_note(self, monkeypatch, tmp_path):
+        """A captioned photo steers like plain text (#158367): one note line per attachment folds
+        into the steer text instead of a silent queue fallback."""
+        import gateway.run as _gr
+
+        monkeypatch.delenv("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED", raising=False)
+        monkeypatch.setattr(_gr, "_load_gateway_config", dict)
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "steer"
+        adapter = _make_adapter()
+
+        screenshot = tmp_path / "shot.png"
+        screenshot.write_bytes(b"PNG")
+        event = _make_event(text="here is the screenshot you asked for")
+        event.message_type = MessageType.PHOTO
+        event.media_urls = [str(screenshot)]
+        event.media_types = ["image/png"]
+        sk = build_session_key(event.source)
+        runner.adapters[event.source.platform] = adapter
+
+        agent = MagicMock()
+        agent.steer = MagicMock(return_value=True)
+        runner._running_agents[sk] = agent
+
+        await runner._handle_active_session_busy_message(event, sk)
+
+        agent.steer.assert_called_once()
+        injected = agent.steer.call_args.args[0]
+        assert "here is the screenshot you asked for" in injected
+        assert f"[The user sent an image, saved at: {screenshot}]" in injected
+        assert '"chat_id": "123"' in injected
+        agent.interrupt.assert_not_called()
+        assert sk not in adapter._pending_messages
+
+    @pytest.mark.asyncio
+    async def test_steer_mode_steers_captionless_document_with_attachment_note(self, monkeypatch, tmp_path):
+        """A caption-less document steers on its attachment note alone (#158367)."""
+        import gateway.run as _gr
+
+        monkeypatch.delenv("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED", raising=False)
+        monkeypatch.setattr(_gr, "_load_gateway_config", dict)
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "steer"
+        adapter = _make_adapter()
+
+        report = tmp_path / "report.pdf"
+        report.write_bytes(b"%PDF")
+        event = _make_event(text="")
+        event.message_type = MessageType.DOCUMENT
+        event.media_urls = [str(report)]
+        event.media_types = ["application/pdf"]
+        sk = build_session_key(event.source)
+        runner.adapters[event.source.platform] = adapter
+
+        agent = MagicMock()
+        agent.steer = MagicMock(return_value=True)
+        runner._running_agents[sk] = agent
+
+        await runner._handle_active_session_busy_message(event, sk)
+
+        agent.steer.assert_called_once()
+        injected = agent.steer.call_args.args[0]
+        assert f"[The user sent a file, saved at: {report}]" in injected
+        assert '"chat_id": "123"' in injected
+        agent.interrupt.assert_not_called()
+        assert sk not in adapter._pending_messages
+
 
     @pytest.mark.asyncio
     async def test_steer_mode_falls_back_to_queue_when_agent_rejects(self):

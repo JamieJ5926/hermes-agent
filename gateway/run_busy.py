@@ -21,6 +21,7 @@ from agent.session_activity import format_iteration_progress
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply
 from gateway.platforms.event import MessageEvent, MessageType
+from gateway.run_inbound_media import rehome_inbound_media
 from gateway.session import SessionSource
 from gateway.whatsapp_identity import canonical_whatsapp_identifier
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -566,6 +567,26 @@ class GatewayBusySessionMixin:
         )
         return (enriched_text or text).strip() if successful_transcripts else text
 
+    def _steer_attachment_notes(self, event: MessageEvent) -> list[str]:
+        """One steer note per non-voice attachment (#158367): a photo or document steers like plain
+        text, its cached path named in the steer text. Voice media stays with the STT path — its
+        transcript (or failure note) is folded in by :meth:`_prepare_busy_steer_text`. Runs after
+        ``rehome_inbound_media``, so the path named is the routed profile's cache the turn's mounts
+        and vision actually read."""
+        from gateway.run import _event_media_is_image, _event_media_is_stt_input, _event_media_is_video
+        notes = []
+        for index, path in enumerate(getattr(event, "media_urls", None) or []):
+            if _event_media_is_stt_input(event, index):
+                continue
+            if _event_media_is_image(event, index):
+                kind = "an image"
+            elif _event_media_is_video(event, index):
+                kind = "a video"
+            else:
+                kind = "a file"
+            notes.append(f"[The user sent {kind}, saved at: {self._agent_audio_path(path)}]")
+        return notes
+
     def _steer_text_with_origin(self, text: str, event: MessageEvent) -> str:
         """Keep event origin in this injection, never in the cached system prompt. In a shared
         session the text carries the same ``[Name]`` sender label a turn-opening message gets."""
@@ -739,16 +760,26 @@ class GatewayBusySessionMixin:
             event.message_type == MessageType.TEXT and not event.media_urls and not event.media_types
         )
         if effective_mode == "steer":
+            # A captioned photo or document steers like plain text (#158367): the files are already
+            # cached (event.media_urls), so re-home them into the routed profile's cache (the same
+            # choke point the normal inbound path runs) and fold one note line per attachment into
+            # the steer text, instead of silently degrading to queue mode.
+            rehome_inbound_media(event)
             steer_text = await self._prepare_busy_steer_text(event)
-            # Steerable: plain text, OR every attachment is voice media folded into steer_text.
-            # A follow-up qualifies for steering when it is plain text, OR when every attachment is
-            # STT-eligible voice media whose transcript was just folded into steer_text — otherwise a voice
-            # note in steer mode silently degrades to queue mode (#58780).
+            attachment_notes = self._steer_attachment_notes(event)
+            if attachment_notes:
+                steer_text = "\n".join(([steer_text] if steer_text.strip() else []) + attachment_notes)
+            # Steerable: plain text, OR every attachment is voice media folded into steer_text, OR
+            # at least one non-voice attachment folded in as a note line. A follow-up qualifies for
+            # steering when it is plain text, OR when every attachment is STT-eligible voice media
+            # whose transcript was just folded into steer_text — otherwise a voice note in steer
+            # mode silently degrades to queue mode (#58780); a photo/document degrades for the same
+            # reason (#158367) and now steers on its note lines.
             _steer_media_urls = getattr(event, "media_urls", None) or []
             _steer_all_voice = bool(_steer_media_urls) and (
                 len(self._pending_event_audio_paths(event)) == len(_steer_media_urls)
             )
-            if steer_text and (plain_text or _steer_all_voice) and agent_live and hasattr(running_agent, "steer"):
+            if steer_text and (plain_text or _steer_all_voice or attachment_notes) and agent_live and hasattr(running_agent, "steer"):
                 steered = self._try_agent_verb(
                     running_agent, "steer", steer_text, session_key, event=event
                 )
