@@ -41,7 +41,7 @@ OVERPASS_URLS = [
 ]
 # Backward-compat alias for any caller that imports OVERPASS_API directly.
 OVERPASS_API      = OVERPASS_URLS[0]
-OSRM_BASE         = "https://router.project-osrm.org/route/v1"
+OSRM_BASE         = "https://routing.openstreetmap.de"
 TIMEAPI_BASE      = "https://timeapi.io/api/timezone/coordinate"
 
 # Seconds to sleep between Nominatim requests (ToS requirement)
@@ -137,9 +137,9 @@ def _tags_for(category):
     return [entry]
 
 OSRM_PROFILES = {
-    "driving": "driving",
-    "walking": "foot",
-    "cycling": "bike",
+    "driving": "routed-car/route/v1/driving",
+    "walking": "routed-foot/route/v1/driving",
+    "cycling": "routed-bike/route/v1/driving",
 }
 
 # ---------------------------------------------------------------------------
