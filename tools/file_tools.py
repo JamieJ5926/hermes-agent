@@ -34,7 +34,8 @@ from tools.file_tools_paths import (
 from tools.file_tools_write_guards import (
     _READ_DEDUP_STATUS_MESSAGE, _check_approval_required_write, _check_binary_document_write,
     _check_cross_profile_path, _check_protected_instruction_write, _check_sensitive_path,
-    _is_internal_file_tool_content, _stale_overwrite_blocker, _stale_write_refusal)
+    _is_internal_file_tool_content, _stale_overwrite_blocker, _stale_patch_blocker,
+    _stale_write_refusal)
 from tools.file_tools_read_tracking import (
     _bump_consecutive, _cap_read_tracker_data, _carry_full_write_baselines, _check_file_staleness,
     _check_not_found_cache, _dedup_lookup, _known_full_content_sha256,
@@ -1016,6 +1017,17 @@ def patch_tool(mode: str = "replace", path: str | None = None, old_string: str |
         with ExitStack() as _locks:
             for _r in sorted({_r for _r in (*_path_to_resolved.values(), *_path_to_entry.values()) if _r}):
                 _locks.enter_context(file_state.lock_path(_r))
+            # Staleness refuses the whole patch BEFORE it applies (#158375): a
+            # patch computed against a copy a sibling or external writer has
+            # since changed can re-apply the sibling's change. write_file
+            # refuses the same way; the residual warnings below stay advisory.
+            _stale_blockers = [b for p in _paths_to_check
+                               if (b := _stale_patch_blocker(p, _path_to_resolved.get(p), task_id))]
+            if _stale_blockers:
+                _blocked = _paths_to_check[0]
+                return json.dumps(_stale_write_refusal(
+                    _blocked, _stale_blockers[0], _path_to_resolved.get(_blocked), patch=True),
+                    ensure_ascii=False)
             stale_warnings = _edit_warnings(_paths_to_check, _path_to_resolved, task_id)
             file_ops = _get_file_ops(task_id)
             # Whole-file knowledge held BEFORE the patch reads, under the same locks. Like

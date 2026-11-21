@@ -27,6 +27,7 @@ from unittest.mock import patch
 from tools import file_state
 from tools.file_tools import (
     clear_file_ops_cache,
+    patch_tool,
     read_file_tool,
     write_file_tool,
 )
@@ -262,6 +263,28 @@ class FileToolsIntegrationTests(unittest.TestCase):
         self.assertIn("sibling", err.lower())
         with open(p) as f:
             self.assertEqual(f.read(), "B wrote\n")
+
+    def test_sibling_agent_write_refuses_stale_patch_through_handler(self):
+        """Issue #158375: a sibling wrote after this task's read; patch_tool must
+        refuse the apply (not warn-and-apply) so the sibling's change is not
+        duplicated."""
+        p = self._write_seed("shared_patch.txt")
+        self.assertNotIn("error", json.loads(read_file_tool(path=p, task_id="agentA")))
+
+        self.assertNotIn("error", json.loads(read_file_tool(path=p, task_id="agentB")))
+        # agentB appends, so agentA's stale old_string still matches the current
+        # content — exactly the pre-condition that duplicated the sibling's
+        # change before the fix.
+        w_b = json.loads(write_file_tool(path=p, content="seed\nB wrote\n", task_id="agentB"))
+        self.assertNotIn("error", w_b)
+
+        w_a = json.loads(patch_tool(path=p, old_string="seed", new_string="A stale",
+                                    task_id="agentA"))
+        err = w_a.get("error", "")
+        self.assertTrue(w_a.get("stale_write_blocked"), f"expected stale patch refusal, got: {w_a}")
+        self.assertIn("agentB", err)
+        with open(p) as f:
+            self.assertEqual(f.read(), "seed\nB wrote\n")
 
 
 

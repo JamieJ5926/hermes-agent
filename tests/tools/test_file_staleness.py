@@ -3,8 +3,9 @@
 Tests for file staleness detection in write_file and patch.
 
 write_file refuses (before any disk mutation) to overwrite an existing file the
-task never read in full or that changed on disk since that read; patch stays
-warning-only for stale reads.
+task never read in full or that changed on disk since that read; patch refuses
+the same way when the file changed after the task's last read of it (#158375),
+since a stale patch can re-apply a sibling's change.
 
 Run with:  python -m pytest tests/tools/test_file_staleness.py -v
 """
@@ -16,7 +17,7 @@ import time
 import unittest
 from unittest.mock import patch, MagicMock
 
-from tools import file_state
+from tools import file_state, file_tools
 from tools.file_tools import read_file_tool, write_file_tool, patch_tool
 from tools.file_tools_read_tracking import _read_tracker, reset_file_dedup
 
@@ -254,8 +255,9 @@ class TestPatchStaleness(unittest.TestCase):
             pass
 
     @patch("tools.file_tools._get_file_ops")
-    def test_patch_warns_on_stale_file(self, mock_ops):
-        """Patch should warn if the target file changed since last read."""
+    def test_patch_refuses_stale_file(self, mock_ops):
+        """Patch must refuse (not warn-and-apply) when the target file changed
+        since last read — the refusal lands before any disk mutation."""
         mock_ops.return_value = _make_fake_ops("original line\n", 15)
         read_file_tool(self._tmpfile, task_id="p1")
 
@@ -268,8 +270,33 @@ class TestPatchStaleness(unittest.TestCase):
             old_string="original", new_string="patched",
             task_id="p1",
         ))
-        self.assertIn("_warning", result)
-        self.assertIn("modified since you last read", result["_warning"])
+        self.assertIn("modified since you last read", result["error"])
+        self.assertNotIn("files_modified", result)
+        with open(self._tmpfile) as f:
+            self.assertEqual(f.read(), "externally modified\n")
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_patch_refuses_after_sibling_write(self, mock_ops):
+        """Issue #158375: a sibling wrote after this task's read; the patch must
+        refuse instead of applying and duplicating the sibling's change."""
+        mock_ops.return_value = _make_fake_ops("original line\n", 15)
+        read_file_tool(self._tmpfile, task_id="p1")
+
+        # A sibling subagent writes after this task's read: the change lands on
+        # disk and the sibling is recorded as the file's last writer.
+        with open(self._tmpfile, "w") as f:
+            f.write("original line\nsibling line\n")
+        file_state.note_write("sibling", os.path.realpath(self._tmpfile))
+
+        result = json.loads(patch_tool(
+            mode="replace", path=self._tmpfile,
+            old_string="original", new_string="patched",
+            task_id="p1",
+        ))
+        self.assertTrue(result.get("stale_write_blocked"), f"expected stale patch refusal, got: {result}")
+        self.assertIn("sibling", result["error"].lower())
+        with open(self._tmpfile) as f:
+            self.assertEqual(f.read(), "original line\nsibling line\n")
 
     @patch("tools.file_tools._get_file_ops")
     def test_patch_no_warning_when_fresh(self, mock_ops):

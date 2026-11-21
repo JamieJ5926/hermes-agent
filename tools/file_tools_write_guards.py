@@ -614,22 +614,52 @@ def _stale_overwrite_blocker(filepath: str, resolved: str | None, task_id: str) 
         "disk content.")
 
 
-def _stale_write_refusal(filepath: str, reason: str, resolved: str | None = None) -> dict:
-    """Model-facing refusal payload for write_file; ``stale_write_blocked`` lets
-    callers tell it apart from I/O errors."""
-    result = {
-        "error": (
+def _stale_write_refusal(filepath: str, reason: str, resolved: str | None = None,
+                         *, patch: bool = False) -> dict:
+    """Model-facing refusal payload for write_file and patch; ``stale_write_blocked``
+    lets callers tell it apart from I/O errors."""
+    if patch:
+        error = (
+            f"Refusing to patch {filepath}: {reason} "
+            "The file was NOT modified. Reload the current contents with read_file, "
+            "then call patch again with old_string anchored in the current content.")
+    else:
+        error = (
             f"Refusing to overwrite {filepath}: {reason} "
             "The file was NOT modified. Reload the current contents with read_file "
             "(every page, for a file that needs offset/limit), merge the requested "
             "change, then call write_file again. For small edits, prefer patch so "
-            "existing unrelated changes are preserved."),
+            "existing unrelated changes are preserved.")
+    result = {
+        "error": error,
         "stale_write_blocked": True,
         "path": filepath,
     }
     if resolved:
         result["resolved_path"] = resolved
     return result
+
+
+def _stale_patch_blocker(filepath: str, resolved: str | None, task_id: str) -> str | None:
+    """Reason patch must NOT apply, else ``None``: the file changed after this
+    task's last read of it (sibling subagent or external edit). A patch computed
+    against that stale copy can re-apply the sibling's change (#158375), so the
+    refusal lands BEFORE the patch, the way ``_stale_overwrite_blocker`` refuses
+    write_file. Unlike the overwrite blocker, never-read and partially read
+    files may still be patched — targeted edits are patch's purpose — so only
+    the post-read staleness kinds block."""
+    if file_state.guard_disabled():
+        return None
+    if not resolved:
+        return None
+    stale = file_state.check_stale_after_read(task_id, resolved)
+    if stale:
+        return stale
+    if _read_mtime_drifted(resolved, task_id):
+        return (
+            f"{filepath} was modified since you last read it (external edit or "
+            "concurrent agent). Re-read the file before patching.")
+    return None
 
 
 def _is_internal_file_status_text(content: str) -> bool:

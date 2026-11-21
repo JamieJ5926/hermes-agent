@@ -127,33 +127,35 @@ class FileStateRegistry:
             _evict_oldest(self._last_writer, _MAX_GLOBAL_WRITERS)
             self._stamp(task_id, resolved, mtime, now, False)
 
-    def check_stale(self, task_id: str, resolved: str) -> Optional[str]:
-        """Model-facing warning if this write would be stale, else ``None``. Severity
-        order: sibling wrote after our read > mtime drift / partial read > never read."""
+    def _stale_finding(self, task_id: str, resolved: str) -> tuple[Optional[str], Optional[str]]:
+        """``(kind, message)`` for a would-be write's staleness, else ``(None, None)``.
+        Kind order: sibling_after_read > drifted > partial > never_read > sibling_never_read.
+        ``check_stale`` returns the message; ``check_stale_after_read`` keeps only the
+        kinds that mean "the file changed after this task's last read of it"."""
         if _disabled():
-            return None
+            return None, None
         with self._state_lock:
             stamp = self._reads.get(task_id, {}).get(resolved)
             last_writer = self._last_writer.get(resolved)
 
         if stamp is None and last_writer is None:  # net-new file / first touch
-            return None
+            return None, None
         current_mtime = _mtime_or_none(resolved)
         if current_mtime is None:
-            return None  # file doesn't exist — write creates it; not stale
+            return None, None  # file doesn't exist — write creates it; not stale
 
         if last_writer is not None:
             writer_tid, writer_ts = last_writer
             if writer_tid != task_id:
                 if stamp is None:
-                    return (
+                    return "sibling_never_read", (
                         f"{resolved} was modified by sibling subagent "
                         f"{writer_tid!r} but this agent never read it. "
                         "Read the file before writing to avoid overwriting "
                         "the sibling's changes.")
                 read_ts = stamp[1]
                 if writer_ts > read_ts:
-                    return (
+                    return "sibling_after_read", (
                         f"{resolved} was modified by sibling subagent "
                         f"{writer_tid!r} at {_fmt_ts(writer_ts)} — after "
                         f"this agent's last read at {_fmt_ts(read_ts)}. "
@@ -162,20 +164,35 @@ class FileStateRegistry:
         if stamp is not None:
             read_mtime, _read_ts, partial = stamp
             if current_mtime != read_mtime:
-                return (
+                return "drifted", (
                     f"{resolved} was modified since you last read it "
                     "on disk (external edit or unrecorded writer). "
                     "Re-read the file before writing.")
             if partial:
-                return (
+                return "partial", (
                     f"{resolved} was last read with offset/limit pagination "
                     "(partial view). Read the remaining pages, or use patch, "
                     "before overwriting it.")
-            return None
+            return None, None
 
-        return (
+        return "never_read", (
             f"{resolved} was not read by this agent. "
             "Read the file first so you can write an informed edit.")
+
+    def check_stale(self, task_id: str, resolved: str) -> Optional[str]:
+        """Model-facing warning if this write would be stale, else ``None``. Severity
+        order: sibling wrote after our read > mtime drift / partial read > never read."""
+        return self._stale_finding(task_id, resolved)[1]
+
+    def check_stale_after_read(self, task_id: str, resolved: str) -> Optional[str]:
+        """Message when the file changed after this task's last read of it (a
+        sibling subagent wrote after the read, or the mtime drifted since), else
+        ``None``. Never-read and partial-read findings are NOT staleness of a
+        prior read, so targeted edits (patch) may proceed on them."""
+        kind, message = self._stale_finding(task_id, resolved)
+        if kind in ("sibling_after_read", "drifted"):
+            return message
+        return None
 
     def writes_since(self, exclude_task_id: str, since_ts: float,
                      paths: Iterable[str]) -> dict[str, list[str]]:
@@ -240,6 +257,10 @@ def check_stale(task_id: str, resolved_or_path: str | Path) -> Optional[str]:
     return _registry.check_stale(task_id, str(resolved_or_path))
 
 
+def check_stale_after_read(task_id: str, resolved_or_path: str | Path) -> Optional[str]:
+    return _registry.check_stale_after_read(task_id, str(resolved_or_path))
+
+
 def lock_path(resolved_or_path: str | Path):
     return _registry.lock_path(str(resolved_or_path))
 
@@ -255,6 +276,7 @@ def known_reads(task_id: str) -> list[str]:
 __all__ = [
     "FileStateRegistry",
     "check_stale",
+    "check_stale_after_read",
     "get_registry",
     "known_reads",
     "lock_path",
