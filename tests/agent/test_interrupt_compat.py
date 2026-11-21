@@ -32,6 +32,14 @@ class _LegacyAgent:
         self.calls.append(("legacy", message))
 
 
+class _ZeroArgAgent:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple]] = []
+
+    def interrupt(self) -> None:
+        self.calls.append(("zero", ()))
+
+
 def test_explicit_producer_prefers_feature_detected_hard_interrupt() -> None:
     agent = _ModernAgent()
 
@@ -61,6 +69,15 @@ def test_explicit_producer_falls_back_to_old_interrupt_signature() -> None:
     assert request_hard_interrupt(agent, "stop now") is True
 
     assert agent.calls == [("legacy", "stop now")]
+
+
+def test_zero_arg_interrupt_callable_never_receives_message() -> None:
+    agent = _ZeroArgAgent()
+
+    assert request_hard_interrupt(agent, "stop now") is True
+    assert request_hard_interrupt(agent) is True
+
+    assert agent.calls == [("zero", ()), ("zero", ())]
 
 
 def test_explicit_producer_reports_unsupported_agent() -> None:
